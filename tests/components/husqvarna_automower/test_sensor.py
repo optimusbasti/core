@@ -129,6 +129,47 @@ async def test_work_area_sensor(
     assert state.state == "no_work_area_active"
 
 
+async def test_work_area_sensor_without_completed_data(
+    hass: HomeAssistant,
+    mock_automower_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    values: dict[str, MowerAttributes],
+) -> None:
+    """Test that work area sensors are registered even without progress/last_time_completed.
+
+    Regression test: work area sensors used to be filtered out at setup when the
+    work area had never been completed (``progress`` and ``last_time_completed``
+    both ``None``). On subsequent reloads the entity registry kept the stale
+    entity as ``unavailable`` with ``restored: True``, which confused users.
+    The entities should now be created and report ``unavailable`` cleanly until
+    the API provides a value.
+    """
+    await setup_integration(hass, mock_config_entry)
+
+    # "Back lawn" (workAreaId 654321) has no progress nor last_time_completed
+    # in the fixture. Both sensors must exist and be unavailable.
+    progress_state = hass.states.get("sensor.test_mower_1_back_lawn_progress")
+    assert progress_state is not None
+    assert progress_state.state == STATE_UNAVAILABLE
+
+    completed_state = hass.states.get(
+        "sensor.test_mower_1_back_lawn_last_time_completed"
+    )
+    assert completed_state is not None
+    assert completed_state.state == STATE_UNAVAILABLE
+
+    # Once the API reports a value, the sensor must come online.
+    values[TEST_MOWER_ID].work_areas[654321].progress = 75
+    mock_automower_client.get_status.return_value = values
+    freezer.tick(SCAN_INTERVAL)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    progress_state = hass.states.get("sensor.test_mower_1_back_lawn_progress")
+    assert progress_state.state == "75"
+
+
 async def test_restricted_reason_sensor(
     hass: HomeAssistant,
     mock_automower_client: AsyncMock,
