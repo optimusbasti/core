@@ -342,6 +342,7 @@ MOWER_SENSOR_TYPES: tuple[AutomowerSensorEntityDescription, ...] = (
 class WorkAreaSensorEntityDescription(SensorEntityDescription):
     """Describes the work area sensor entities."""
 
+    exists_fn: Callable[[WorkArea], bool] = lambda _: True
     value_fn: Callable[[WorkArea], StateType | datetime]
     translation_key_fn: Callable[[int, str], str]
 
@@ -350,6 +351,7 @@ WORK_AREA_SENSOR_TYPES: tuple[WorkAreaSensorEntityDescription, ...] = (
     WorkAreaSensorEntityDescription(
         key="progress",
         translation_key_fn=_work_area_translation_key,
+        exists_fn=lambda data: data.progress is not None,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         value_fn=attrgetter("progress"),
@@ -357,6 +359,7 @@ WORK_AREA_SENSOR_TYPES: tuple[WorkAreaSensorEntityDescription, ...] = (
     WorkAreaSensorEntityDescription(
         key="last_time_completed",
         translation_key_fn=_work_area_translation_key,
+        exists_fn=lambda data: data.last_time_completed is not None,
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=attrgetter("last_time_completed"),
     ),
@@ -381,6 +384,7 @@ async def async_setup_entry(
                     )
                     for description in WORK_AREA_SENSOR_TYPES
                     for work_area_id in _work_areas
+                    if description.exists_fn(_work_areas[work_area_id])
                 )
         entities.extend(
             AutomowerSensorEntity(mower_id, coordinator, description)
@@ -399,6 +403,28 @@ async def async_setup_entry(
             for description in WORK_AREA_SENSOR_TYPES
             for work_area_id in work_area_ids
             if work_area_id in mower_data.work_areas
+            and description.exists_fn(mower_data.work_areas[work_area_id])
+        )
+
+    def _async_add_new_work_area_extras(
+        mower_id: str, extras: set[tuple[int, str]]
+    ) -> None:
+        """Add work area sensors whose data only now became available."""
+        mower_data = coordinator.data[mower_id]
+        if mower_data.work_areas is None:
+            return
+
+        descriptions_by_key = {
+            description.key: description for description in WORK_AREA_SENSOR_TYPES
+        }
+        async_add_entities(
+            WorkAreaSensorEntity(
+                mower_id, coordinator, descriptions_by_key[key], work_area_id
+            )
+            for work_area_id, key in extras
+            if key in descriptions_by_key
+            and work_area_id in mower_data.work_areas
+            and descriptions_by_key[key].exists_fn(mower_data.work_areas[work_area_id])
         )
 
     def _async_add_new_devices(mower_ids: set[str]) -> None:
@@ -418,6 +444,7 @@ async def async_setup_entry(
 
     coordinator.new_devices_callbacks.append(_async_add_new_devices)
     coordinator.new_areas_callbacks.append(_async_add_new_work_areas)
+    coordinator.new_work_area_extra_callbacks.append(_async_add_new_work_area_extras)
 
 
 class AutomowerSensorEntity(AutomowerBaseEntity, SensorEntity):
@@ -482,18 +509,6 @@ class WorkAreaSensorEntity(WorkAreaAvailableEntity, SensorEntity):
     def native_value(self) -> StateType | datetime:
         """Return the state of the sensor."""
         return self.entity_description.value_fn(self.work_area_attributes)
-
-    @property
-    def available(self) -> bool:
-        """Return True if the work area is available and has a value.
-
-        Work area sensors can return ``None`` when a newly created work area has
-        never been completed (``last_time_completed``) or when the mower has not
-        yet reported ``progress`` for it. Treating these as unavailable keeps
-        the entity in the registry but avoids the ``restored: True`` zombie
-        state when the integration reloads.
-        """
-        return super().available and self.native_value is not None
 
     @property
     def translation_key(self) -> str:

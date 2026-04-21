@@ -129,37 +129,29 @@ async def test_work_area_sensor(
     assert state.state == "no_work_area_active"
 
 
-async def test_work_area_sensor_without_completed_data(
+async def test_work_area_sensor_added_when_data_arrives(
     hass: HomeAssistant,
     mock_automower_client: AsyncMock,
     mock_config_entry: MockConfigEntry,
     freezer: FrozenDateTimeFactory,
     values: dict[str, MowerAttributes],
 ) -> None:
-    """Test that work area sensors are registered even without progress/last_time_completed.
+    """Test that work area sensors are added once the API reports a value.
 
-    Regression test: work area sensors used to be filtered out at setup when the
-    work area had never been completed (``progress`` and ``last_time_completed``
-    both ``None``). On subsequent reloads the entity registry kept the stale
-    entity as ``unavailable`` with ``restored: True``, which confused users.
-    The entities should now be created and report ``unavailable`` cleanly until
-    the API provides a value.
+    Regression test: work areas that had never reported ``progress`` or
+    ``last_time_completed`` were filtered out at setup and the entity registry
+    kept a stale ``unavailable`` entry with ``restored: True`` after the
+    mower eventually reported a value. The sensors must not exist while the
+    attributes are ``None`` and must be created dynamically as soon as the
+    coordinator sees a value for them.
     """
     await setup_integration(hass, mock_config_entry)
 
     # "Back lawn" (workAreaId 654321) has no progress nor last_time_completed
-    # in the fixture. Both sensors must exist and be unavailable.
-    progress_state = hass.states.get("sensor.test_mower_1_back_lawn_progress")
-    assert progress_state is not None
-    assert progress_state.state == STATE_UNAVAILABLE
+    # in the fixture, so neither sensor should be registered at setup time.
+    assert hass.states.get("sensor.test_mower_1_back_lawn_progress") is None
+    assert hass.states.get("sensor.test_mower_1_back_lawn_last_time_completed") is None
 
-    completed_state = hass.states.get(
-        "sensor.test_mower_1_back_lawn_last_time_completed"
-    )
-    assert completed_state is not None
-    assert completed_state.state == STATE_UNAVAILABLE
-
-    # Once the API reports a value, the sensor must come online.
     values[TEST_MOWER_ID].work_areas[654321].progress = 75
     mock_automower_client.get_status.return_value = values
     freezer.tick(SCAN_INTERVAL)
@@ -167,7 +159,25 @@ async def test_work_area_sensor_without_completed_data(
     await hass.async_block_till_done()
 
     progress_state = hass.states.get("sensor.test_mower_1_back_lawn_progress")
+    assert progress_state is not None
     assert progress_state.state == "75"
+
+    # last_time_completed is still None, so that sensor must not be created.
+    assert hass.states.get("sensor.test_mower_1_back_lawn_last_time_completed") is None
+
+    values[TEST_MOWER_ID].work_areas[654321].last_time_completed = datetime.datetime(
+        2024, 10, 1, 11, 11, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin")
+    )
+    mock_automower_client.get_status.return_value = values
+    freezer.tick(SCAN_INTERVAL)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    completed_state = hass.states.get(
+        "sensor.test_mower_1_back_lawn_last_time_completed"
+    )
+    assert completed_state is not None
+    assert completed_state.state != STATE_UNAVAILABLE
 
 
 async def test_restricted_reason_sensor(

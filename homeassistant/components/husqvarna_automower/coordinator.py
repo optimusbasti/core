@@ -59,6 +59,9 @@ class AutomowerDataUpdateCoordinator(DataUpdateCoordinator[MowerDictionary]):
         self.new_devices_callbacks: list[Callable[[set[str]], None]] = []
         self.new_zones_callbacks: list[Callable[[str, set[str]], None]] = []
         self.new_areas_callbacks: list[Callable[[str, set[int]], None]] = []
+        self.new_work_area_extra_callbacks: list[
+            Callable[[str, set[tuple[int, str]]], None]
+        ] = []
         self.pong: datetime | None = None
         self.websocket_alive: bool = False
         self.websocket_callbacks: list[Callable[[bool], None]] = []
@@ -110,6 +113,7 @@ class AutomowerDataUpdateCoordinator(DataUpdateCoordinator[MowerDictionary]):
                 mower_data.capabilities.work_areas for mower_data in self.data.values()
             ):
                 self._async_add_remove_work_areas()
+                self._async_add_remove_work_area_extra_entities()
             if (
                 not self._should_poll()
                 and self.update_interval is not None
@@ -326,3 +330,57 @@ class AutomowerDataUpdateCoordinator(DataUpdateCoordinator[MowerDictionary]):
                     for area_id in removed_areas:
                         if entry.unique_id.startswith(f"{mower_id}_{area_id}_"):
                             entity_registry.async_remove(entry.entity_id)
+
+    def _async_add_remove_work_area_extra_entities(self) -> None:
+        """Add work area entities whose data only becomes available later.
+
+        Some work area attributes (``progress``, ``last_time_completed``) are
+        ``None`` on mowers that do not report them and for newly created work
+        areas that have not been completed yet. The platforms filter entities
+        with these attributes out at setup time to avoid creating sensors for
+        mowers that never expose them. As soon as the API reports a value for
+        an existing work area the corresponding entity is registered here.
+        """
+        extra_keys = ("progress", "last_time_completed")
+
+        entity_registry = er.async_get(self.hass)
+        entries = er.async_entries_for_config_entry(
+            entity_registry, self.config_entry.entry_id
+        )
+
+        registered: dict[str, set[tuple[int, str]]] = {
+            mower_id: set() for mower_id in self.data
+        }
+        for entry in entries:
+            uid = entry.unique_id
+            for mower_id in self.data:
+                prefix = f"{mower_id}_"
+                if not uid.startswith(prefix):
+                    continue
+                remainder = uid.removeprefix(prefix)
+                for key in extra_keys:
+                    suffix = f"_{key}"
+                    if not remainder.endswith(suffix):
+                        continue
+                    area_id_str = remainder.removesuffix(suffix)
+                    if area_id_str.isdigit():
+                        registered[mower_id].add((int(area_id_str), key))
+                break
+
+        for mower_id, mower_data in self.data.items():
+            if not mower_data.capabilities.work_areas or mower_data.work_areas is None:
+                continue
+
+            available: set[tuple[int, str]] = set()
+            for work_area_id, work_area in mower_data.work_areas.items():
+                for key in extra_keys:
+                    if getattr(work_area, key) is not None:
+                        available.add((work_area_id, key))
+
+            new_extras = available - registered[mower_id]
+            if new_extras:
+                _LOGGER.debug(
+                    "New work area extra entities for %s: %s", mower_id, new_extras
+                )
+                for extra_callback in self.new_work_area_extra_callbacks:
+                    extra_callback(mower_id, new_extras)
