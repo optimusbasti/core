@@ -14,6 +14,7 @@ from aioautomower.model import (
     MowerModes,
     RestrictedReasons,
     WorkArea,
+    WorkAreaType,
 )
 
 from homeassistant.components.sensor import (
@@ -342,6 +343,7 @@ MOWER_SENSOR_TYPES: tuple[AutomowerSensorEntityDescription, ...] = (
 class WorkAreaSensorEntityDescription(SensorEntityDescription):
     """Describes the work area sensor entities."""
 
+    exists_fn: Callable[[WorkArea], bool] = lambda _: True
     value_fn: Callable[[WorkArea], StateType | datetime]
     translation_key_fn: Callable[[int, str], str]
 
@@ -350,6 +352,7 @@ WORK_AREA_SENSOR_TYPES: tuple[WorkAreaSensorEntityDescription, ...] = (
     WorkAreaSensorEntityDescription(
         key="progress",
         translation_key_fn=_work_area_translation_key,
+        exists_fn=lambda data: data.type == WorkAreaType.SYSTEMATIC,
         state_class=SensorStateClass.MEASUREMENT,
         native_unit_of_measurement=PERCENTAGE,
         value_fn=attrgetter("progress"),
@@ -357,6 +360,7 @@ WORK_AREA_SENSOR_TYPES: tuple[WorkAreaSensorEntityDescription, ...] = (
     WorkAreaSensorEntityDescription(
         key="last_time_completed",
         translation_key_fn=_work_area_translation_key,
+        exists_fn=lambda data: data.type == WorkAreaType.SYSTEMATIC,
         device_class=SensorDeviceClass.TIMESTAMP,
         value_fn=attrgetter("last_time_completed"),
     ),
@@ -381,6 +385,7 @@ async def async_setup_entry(
                     )
                     for description in WORK_AREA_SENSOR_TYPES
                     for work_area_id in _work_areas
+                    if description.exists_fn(_work_areas[work_area_id])
                 )
         entities.extend(
             AutomowerSensorEntity(mower_id, coordinator, description)
@@ -399,6 +404,7 @@ async def async_setup_entry(
             for description in WORK_AREA_SENSOR_TYPES
             for work_area_id in work_area_ids
             if work_area_id in mower_data.work_areas
+            and description.exists_fn(mower_data.work_areas[work_area_id])
         )
 
     def _async_add_new_devices(mower_ids: set[str]) -> None:

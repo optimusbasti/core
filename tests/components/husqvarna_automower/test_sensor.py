@@ -25,6 +25,12 @@ from .const import TEST_MOWER_ID
 
 from tests.common import MockConfigEntry, async_fire_time_changed, snapshot_platform
 
+# Work-area IDs used in tests/components/husqvarna_automower/fixtures/mower.json.
+# 123456 -> "Front lawn", type SYSTEMATIC
+#    0   -> "" (deserialized to "my_lawn"), type SYSTEMATIC
+# 654321 -> "Back lawn",  type RANDOM (no progress / last_time_completed)
+SYSTEMATIC_WORK_AREA_ID = 123456
+
 
 async def test_sensor_unknown_states(
     hass: HomeAssistant,
@@ -129,56 +135,79 @@ async def test_work_area_sensor(
     assert state.state == "no_work_area_active"
 
 
-async def test_work_area_sensor_recovers_existing_registry_entry(
+async def test_work_area_progress_sensors_gated_by_type(
     hass: HomeAssistant,
-    entity_registry: er.EntityRegistry,
+    mock_automower_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+) -> None:
+    """Progress and last_time_completed sensors only exist for SYSTEMATIC areas.
+
+    Random work areas never report ``progress`` / ``lastTimeCompleted`` from
+    the Husqvarna API, so the corresponding sensors must not be created. The
+    setup-time gate is on ``WorkArea.type == SYSTEMATIC`` (stable, capability-
+    derived) instead of on the value being ``None`` (transient), which avoids
+    the previous registry-restore zombie state for systematic areas where the
+    value briefly went ``None`` between completions.
+    """
+    await setup_integration(hass, mock_config_entry)
+
+    # Front lawn (SYSTEMATIC, work-area id 123456) -> entities are created.
+    assert hass.states.get("sensor.test_mower_1_front_lawn_progress") is not None
+    assert (
+        hass.states.get("sensor.test_mower_1_front_lawn_last_time_completed")
+        is not None
+    )
+
+    # Back lawn (RANDOM, work-area id 654321) -> entities are filtered out at
+    # setup time, regardless of whether the API populates progress later.
+    assert hass.states.get("sensor.test_mower_1_back_lawn_progress") is None
+    assert (
+        hass.states.get("sensor.test_mower_1_back_lawn_last_time_completed")
+        is None
+    )
+
+
+async def test_work_area_systematic_sensor_unavailable_without_value(
+    hass: HomeAssistant,
     mock_automower_client: AsyncMock,
     mock_config_entry: MockConfigEntry,
     freezer: FrozenDateTimeFactory,
     values: dict[str, MowerAttributes],
 ) -> None:
-    """Regression: a stale registry entry must come back online once data arrives.
+    """A SYSTEMATIC area with a transient ``None`` value reports unavailable.
 
-    A prior install registered the ``back_lawn`` work area sensors after the
-    API had reported a value. The earlier setup-time filter then dropped the
-    entity on every subsequent restart while the API briefly returned
-    ``None``, leaving the registry entry stuck on ``unavailable``. The fix
-    always registers the entities and lets ``available`` follow the value, so
-    a pre-existing registry entry must reappear and report the concrete value
-    once the API provides one again.
+    Regression: previously the value-based ``exists_fn`` filter would drop the
+    entity at setup whenever ``progress``/``last_time_completed`` was briefly
+    ``None``, leaving the entity-registry entry behind as a permanent
+    ``restored: True`` zombie. With the type-based gate the entity is
+    registered as long as the area exists; while the value is ``None`` the
+    standard ``available`` property returns ``False`` and the sensor reports
+    ``unavailable`` cleanly, then recovers to a concrete value once the API
+    reports one.
     """
-    await hass.config.async_set_time_zone("Europe/Berlin")
-    mock_config_entry.add_to_hass(hass)
-    entity_registry.async_get_or_create(
-        domain="sensor",
-        platform="husqvarna_automower",
-        unique_id=f"{TEST_MOWER_ID}_654321_last_time_completed",
-        suggested_object_id="test_mower_1_back_lawn_last_time_completed",
-        config_entry=mock_config_entry,
-    )
+    values[TEST_MOWER_ID].work_areas[SYSTEMATIC_WORK_AREA_ID].last_time_completed = None
+    mock_automower_client.get_status.return_value = values
 
-    await hass.config_entries.async_setup(mock_config_entry.entry_id)
-    await hass.async_block_till_done()
+    await setup_integration(hass, mock_config_entry)
 
-    completed_state = hass.states.get(
-        "sensor.test_mower_1_back_lawn_last_time_completed"
-    )
-    assert completed_state is not None
-    assert completed_state.state == STATE_UNAVAILABLE
+    sensor_id = "sensor.test_mower_1_front_lawn_last_time_completed"
+    state = hass.states.get(sensor_id)
+    assert state is not None
+    assert state.state == STATE_UNAVAILABLE
 
-    values[TEST_MOWER_ID].work_areas[654321].last_time_completed = datetime.datetime(
-        2024, 10, 1, 11, 11, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin")
+    values[TEST_MOWER_ID].work_areas[SYSTEMATIC_WORK_AREA_ID].last_time_completed = (
+        datetime.datetime(
+            2024, 10, 1, 11, 11, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin")
+        )
     )
     mock_automower_client.get_status.return_value = values
     freezer.tick(SCAN_INTERVAL)
     async_fire_time_changed(hass)
     await hass.async_block_till_done()
 
-    completed_state = hass.states.get(
-        "sensor.test_mower_1_back_lawn_last_time_completed"
-    )
-    assert completed_state is not None
-    assert completed_state.state == "2024-10-01T09:11:00+00:00"
+    state = hass.states.get(sensor_id)
+    assert state is not None
+    assert state.state == "2024-10-01T09:11:00+00:00"
 
 
 async def test_restricted_reason_sensor(
