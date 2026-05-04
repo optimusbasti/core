@@ -161,10 +161,7 @@ async def test_work_area_progress_sensors_gated_by_type(
     # Back lawn (RANDOM, work-area id 654321) -> entities are filtered out at
     # setup time, regardless of whether the API populates progress later.
     assert hass.states.get("sensor.test_mower_1_back_lawn_progress") is None
-    assert (
-        hass.states.get("sensor.test_mower_1_back_lawn_last_time_completed")
-        is None
-    )
+    assert hass.states.get("sensor.test_mower_1_back_lawn_last_time_completed") is None
 
 
 async def test_work_area_systematic_sensor_unavailable_without_value(
@@ -195,10 +192,10 @@ async def test_work_area_systematic_sensor_unavailable_without_value(
     assert state is not None
     assert state.state == STATE_UNAVAILABLE
 
-    values[TEST_MOWER_ID].work_areas[SYSTEMATIC_WORK_AREA_ID].last_time_completed = (
-        datetime.datetime(
-            2024, 10, 1, 11, 11, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin")
-        )
+    values[TEST_MOWER_ID].work_areas[
+        SYSTEMATIC_WORK_AREA_ID
+    ].last_time_completed = datetime.datetime(
+        2024, 10, 1, 11, 11, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin")
     )
     mock_automower_client.get_status.return_value = values
     freezer.tick(SCAN_INTERVAL)
