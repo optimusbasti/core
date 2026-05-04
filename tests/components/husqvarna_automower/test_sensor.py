@@ -15,6 +15,7 @@ from freezegun.api import FrozenDateTimeFactory
 import pytest
 from syrupy.assertion import SnapshotAssertion
 
+from homeassistant.components.husqvarna_automower.const import DOMAIN
 from homeassistant.components.husqvarna_automower.coordinator import SCAN_INTERVAL
 from homeassistant.const import STATE_UNAVAILABLE, Platform
 from homeassistant.core import HomeAssistant
@@ -205,6 +206,104 @@ async def test_work_area_systematic_sensor_unavailable_without_value(
     state = hass.states.get(sensor_id)
     assert state is not None
     assert state.state == "2024-10-01T09:11:00+00:00"
+
+
+async def test_work_area_sensor_restores_from_entity_registry(
+    hass: HomeAssistant,
+    entity_registry: er.EntityRegistry,
+    mock_automower_client: AsyncMock,
+    mock_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    values: dict[str, MowerAttributes],
+) -> None:
+    """Pre-existing registry entries must be reused, not duplicated, on setup.
+
+    Regression for the original bug: a previous integration version had
+    registered ``progress`` / ``last_time_completed`` sensors for a SYSTEMATIC
+    work area; on a later reload the value-based ``exists_fn`` filter dropped
+    the entity at setup, leaving the registry entry behind as a permanent
+    ``restored: True`` zombie that never recovered.
+
+    This test exercises that restore path directly:
+
+    1. Pre-create entity-registry entries for the SYSTEMATIC ``Front lawn``
+       progress and last_time_completed sensors (mirroring what a previous
+       setup would have left behind).
+    2. Force the coordinator to report ``None`` for both values, simulating
+       the brief window in which the original filter would have dropped the
+       entities.
+    3. Run setup. The pre-existing registry entries must be reused (no
+       ``_2`` suffix) and the entities must register cleanly as
+       ``unavailable`` instead of staying as restored zombies.
+    4. Once the API reports concrete values again, the same entity ids must
+       transition to those values without a reload.
+    """
+    progress_entity_id = "sensor.test_mower_1_front_lawn_progress"
+    last_time_entity_id = "sensor.test_mower_1_front_lawn_last_time_completed"
+    progress_unique_id = f"{TEST_MOWER_ID}_{SYSTEMATIC_WORK_AREA_ID}_progress"
+    last_time_unique_id = (
+        f"{TEST_MOWER_ID}_{SYSTEMATIC_WORK_AREA_ID}_last_time_completed"
+    )
+
+    mock_config_entry.add_to_hass(hass)
+
+    progress_entry = entity_registry.async_get_or_create(
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=progress_unique_id,
+        suggested_object_id="test_mower_1_front_lawn_progress",
+        config_entry=mock_config_entry,
+    )
+    last_time_entry = entity_registry.async_get_or_create(
+        domain="sensor",
+        platform=DOMAIN,
+        unique_id=last_time_unique_id,
+        suggested_object_id="test_mower_1_front_lawn_last_time_completed",
+        config_entry=mock_config_entry,
+    )
+    assert progress_entry.entity_id == progress_entity_id
+    assert last_time_entry.entity_id == last_time_entity_id
+
+    values[TEST_MOWER_ID].work_areas[SYSTEMATIC_WORK_AREA_ID].progress = None
+    values[TEST_MOWER_ID].work_areas[SYSTEMATIC_WORK_AREA_ID].last_time_completed = None
+    mock_automower_client.get_status.return_value = values
+
+    await hass.config_entries.async_setup(mock_config_entry.entry_id)
+    await hass.async_block_till_done()
+
+    # Same entity ids reused, no duplicates with a ``_2`` suffix.
+    assert entity_registry.async_get(progress_entity_id) is not None
+    assert entity_registry.async_get(f"{progress_entity_id}_2") is None
+    assert entity_registry.async_get(last_time_entity_id) is not None
+    assert entity_registry.async_get(f"{last_time_entity_id}_2") is None
+
+    # Both sensors are registered but unavailable while values are ``None``.
+    progress_state = hass.states.get(progress_entity_id)
+    last_time_state = hass.states.get(last_time_entity_id)
+    assert progress_state is not None
+    assert progress_state.state == STATE_UNAVAILABLE
+    assert last_time_state is not None
+    assert last_time_state.state == STATE_UNAVAILABLE
+
+    # Coordinator now reports concrete values; entities recover without
+    # reload or re-setup.
+    values[TEST_MOWER_ID].work_areas[SYSTEMATIC_WORK_AREA_ID].progress = 42
+    values[TEST_MOWER_ID].work_areas[
+        SYSTEMATIC_WORK_AREA_ID
+    ].last_time_completed = datetime.datetime(
+        2024, 10, 1, 11, 11, 0, tzinfo=zoneinfo.ZoneInfo("Europe/Berlin")
+    )
+    mock_automower_client.get_status.return_value = values
+    freezer.tick(SCAN_INTERVAL)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    progress_state = hass.states.get(progress_entity_id)
+    last_time_state = hass.states.get(last_time_entity_id)
+    assert progress_state is not None
+    assert progress_state.state == "42"
+    assert last_time_state is not None
+    assert last_time_state.state == "2024-10-01T09:11:00+00:00"
 
 
 async def test_restricted_reason_sensor(
