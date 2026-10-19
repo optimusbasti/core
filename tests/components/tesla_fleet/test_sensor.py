@@ -9,6 +9,7 @@ import pytest
 from syrupy.assertion import SnapshotAssertion
 from tesla_fleet_api.exceptions import VehicleOffline
 
+from homeassistant.components.sensor import SensorStateClass
 from homeassistant.components.tesla_fleet.coordinator import (
     ENERGY_HISTORY_INTERVAL,
     VEHICLE_INTERVAL,
@@ -188,6 +189,37 @@ async def test_charge_energy_restore_last_reset(
     # last_reset should be restored
     state = hass.states.get(entity_id)
     assert state.attributes["last_reset"] == last_reset
+
+
+@pytest.mark.usefixtures("entity_registry_enabled_by_default")
+async def test_odometer_decrease(
+    hass: HomeAssistant,
+    normal_config_entry: MockConfigEntry,
+    freezer: FrozenDateTimeFactory,
+    mock_vehicle_data: AsyncMock,
+) -> None:
+    """Test that a lower odometer reading is passed through without a reset."""
+
+    initial_data = deepcopy(VEHICLE_DATA)
+    initial_data["response"]["vehicle_state"]["odometer"] = 1000.0
+    mock_vehicle_data.return_value = initial_data
+    await setup_platform(hass, normal_config_entry, [Platform.SENSOR])
+    entity_id = "sensor.test_odometer"
+
+    state = hass.states.get(entity_id)
+    assert state.attributes["state_class"] == SensorStateClass.TOTAL
+    initial_state = float(state.state)
+
+    lower_data = deepcopy(VEHICLE_DATA)
+    lower_data["response"]["vehicle_state"]["odometer"] = 999.9
+    mock_vehicle_data.return_value = lower_data
+    freezer.tick(VEHICLE_INTERVAL)
+    async_fire_time_changed(hass)
+    await hass.async_block_till_done()
+
+    state = hass.states.get(entity_id)
+    assert float(state.state) < initial_state
+    assert state.attributes.get("last_reset") is None
 
 
 @pytest.mark.usefixtures("entity_registry_enabled_by_default")
