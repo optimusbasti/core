@@ -337,10 +337,10 @@ class HomeConnectApplianceCoordinator(DataUpdateCoordinator[HomeConnectAppliance
                         # When the active program is cleared, refresh options from the selected
                         # program so the UI doesn't keep showing the completed program's options.
                         # Wait for READY; earlier requests fail.
-                        await self.update_options(program)
                         self.last_fetched_program = (
-                            EventKey.BSH_COMMON_ROOT_SELECTED_PROGRAM,
-                            program,
+                            (EventKey.BSH_COMMON_ROOT_SELECTED_PROGRAM, program)
+                            if await self.update_options(program)
+                            else None
                         )
                         # Notify listeners to discover entities for the refreshed options.
                         for listener in self._get_listeners_for_event_key(
@@ -414,8 +414,11 @@ class HomeConnectApplianceCoordinator(DataUpdateCoordinator[HomeConnectAppliance
                     program_update_event_value
                     and self.last_fetched_program != program_update_event_value
                 ):
-                    await self.update_options(program_update_event_value[1])
-                    self.last_fetched_program = program_update_event_value
+                    self.last_fetched_program = (
+                        program_update_event_value
+                        if await self.update_options(program_update_event_value[1])
+                        else None
+                    )
                 self._call_event_listener(event_message)
 
             case EventType.EVENT:
@@ -618,7 +621,9 @@ class HomeConnectApplianceCoordinator(DataUpdateCoordinator[HomeConnectAppliance
                                     break
 
                 if current_program_key:
-                    options = await self.get_options_definitions(current_program_key)
+                    options = (
+                        await self.get_options_definitions(current_program_key) or {}
+                    )
                     for option in program_options or []:
                         option_event_key = EventKey(option.key)
                         events[option_event_key] = Event(
@@ -659,8 +664,8 @@ class HomeConnectApplianceCoordinator(DataUpdateCoordinator[HomeConnectAppliance
 
     async def get_options_definitions(
         self, program_key: ProgramKey
-    ) -> dict[OptionKey, ProgramDefinitionOption]:
-        """Get options with constraints for appliance."""
+    ) -> dict[OptionKey, ProgramDefinitionOption] | None:
+        """Get options with constraints for appliance, or None if the request failed."""
         if program_key is ProgramKey.UNKNOWN:
             return {}
         try:
@@ -681,10 +686,10 @@ class HomeConnectApplianceCoordinator(DataUpdateCoordinator[HomeConnectAppliance
                 self.data.info.ha_id,
                 error,
             )
-            return {}
+            return None
 
-    async def update_options(self, program_key: ProgramKey) -> None:
-        """Update options for appliance."""
+    async def update_options(self, program_key: ProgramKey) -> bool:
+        """Update options for appliance and return whether the fetch succeeded."""
         options = self.data.options
         events = self.data.events
         options_to_notify = options.copy()
@@ -700,7 +705,8 @@ class HomeConnectApplianceCoordinator(DataUpdateCoordinator[HomeConnectAppliance
         else:
             resolved_program_key = program_key
 
-        options.update(await self.get_options_definitions(resolved_program_key))
+        options_definitions = await self.get_options_definitions(resolved_program_key)
+        options.update(options_definitions or {})
 
         for option in options.values():
             option_event_key = EventKey(option.key)
@@ -723,6 +729,7 @@ class HomeConnectApplianceCoordinator(DataUpdateCoordinator[HomeConnectAppliance
         for option_key in options_to_notify:
             for listener in self._get_listeners_for_event_key(EventKey(option_key)):
                 listener()
+        return options_definitions is not None
 
     def refreshed_too_often_recently(self) -> bool:
         """Check if the appliance data hasn't been refreshed too often recently."""

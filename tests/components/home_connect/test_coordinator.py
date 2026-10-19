@@ -1235,6 +1235,177 @@ async def test_fetch_options_for_selected_program_when_active_program_finishes(
     assert selected_program_option_state.state != STATE_UNAVAILABLE
 
 
+@pytest.mark.parametrize(
+    ("event_order", "fetch_results", "expected_fetches", "expected_available"),
+    [
+        pytest.param(
+            [0, 1, 2],
+            [True],
+            1,
+            True,
+            id="fetch_before_ready_succeeds",
+        ),
+        pytest.param(
+            [0, 1, 2],
+            [False, True],
+            2,
+            True,
+            id="fetch_before_ready_fails_retry_on_active_program_cleared",
+        ),
+        pytest.param(
+            [0, 2, 1],
+            [False, True],
+            2,
+            True,
+            id="fetch_before_ready_fails_retry_on_ready",
+        ),
+        pytest.param(
+            [0, 1, 2],
+            [False, False],
+            2,
+            False,
+            id="fetch_before_ready_fails_retry_fails",
+        ),
+    ],
+)
+@pytest.mark.parametrize("appliance", ["Dishwasher"], indirect=True)
+async def test_retry_options_fetch_when_selected_program_fetch_failed(
+    hass: HomeAssistant,
+    client: MagicMock,
+    config_entry: MockConfigEntry,
+    integration_setup: Callable[[MagicMock], Awaitable[bool]],
+    appliance: HomeAppliance,
+    event_order: list[int],
+    fetch_results: list[bool],
+    expected_fetches: int,
+    expected_available: bool,
+) -> None:
+    """Test a failed selected program options fetch is retried once the appliance is ready."""
+    appliance_ha_id = appliance.ha_id
+    client.get_all_programs = AsyncMock(
+        return_value=ArrayOfPrograms(
+            [
+                EnumerateProgram(
+                    ProgramKey.DISHCARE_DISHWASHER_AUTO_1,
+                    ProgramKey.DISHCARE_DISHWASHER_AUTO_1.value,
+                )
+            ],
+            Program(key=ProgramKey.DISHCARE_DISHWASHER_AUTO_1),
+            Program(key=ProgramKey.DISHCARE_DISHWASHER_AUTO_1),
+        )
+    )
+    client.get_available_program = AsyncMock(
+        return_value=ProgramDefinition(
+            ProgramKey.DISHCARE_DISHWASHER_AUTO_1, options=[]
+        )
+    )
+    assert await integration_setup(client)
+    assert config_entry.state is ConfigEntryState.LOADED
+    selected_program_option_entity_id = "switch.dishwasher_half_load"
+
+    await client.add_events(
+        [
+            EventMessage(
+                appliance_ha_id,
+                EventType.STATUS,
+                data=ArrayOfEvents(
+                    [
+                        Event(
+                            key=StatusKey.BSH_COMMON_OPERATION_STATE,
+                            raw_key=StatusKey.BSH_COMMON_OPERATION_STATE.value,
+                            timestamp=0,
+                            level="",
+                            handling="",
+                            value=BSH_OPERATION_STATE_FINISHED,
+                        )
+                    ]
+                ),
+            )
+        ]
+    )
+    await hass.async_block_till_done()
+
+    events = [
+        EventMessage(
+            appliance_ha_id,
+            EventType.NOTIFY,
+            data=ArrayOfEvents(
+                [
+                    Event(
+                        key=EventKey.BSH_COMMON_ROOT_SELECTED_PROGRAM,
+                        raw_key=EventKey.BSH_COMMON_ROOT_SELECTED_PROGRAM.value,
+                        timestamp=0,
+                        level="",
+                        handling="",
+                        value=ProgramKey.DISHCARE_DISHWASHER_ECO_50.value,
+                    )
+                ]
+            ),
+        ),
+        EventMessage(
+            appliance_ha_id,
+            EventType.STATUS,
+            data=ArrayOfEvents(
+                [
+                    Event(
+                        key=StatusKey.BSH_COMMON_OPERATION_STATE,
+                        raw_key=StatusKey.BSH_COMMON_OPERATION_STATE.value,
+                        timestamp=0,
+                        level="",
+                        handling="",
+                        value=BSH_OPERATION_STATE_READY,
+                    )
+                ]
+            ),
+        ),
+        EventMessage(
+            appliance_ha_id,
+            EventType.NOTIFY,
+            data=ArrayOfEvents(
+                [
+                    Event(
+                        key=EventKey.BSH_COMMON_ROOT_ACTIVE_PROGRAM,
+                        raw_key=EventKey.BSH_COMMON_ROOT_ACTIVE_PROGRAM.value,
+                        timestamp=0,
+                        level="",
+                        handling="",
+                        value=None,
+                    )
+                ]
+            ),
+        ),
+    ]
+    client.get_available_program = AsyncMock(
+        side_effect=[
+            ProgramDefinition(
+                ProgramKey.DISHCARE_DISHWASHER_ECO_50,
+                options=[
+                    ProgramDefinitionOption(
+                        OptionKey.DISHCARE_DISHWASHER_HALF_LOAD,
+                        "Boolean",
+                        constraints=ProgramDefinitionConstraints(default=False),
+                    )
+                ],
+            )
+            if succeeds
+            else HomeConnectApiError("error.key", "error description")
+            for succeeds in fetch_results
+        ]
+    )
+    await client.add_events([events[i] for i in event_order])
+    await hass.async_block_till_done()
+
+    assert (
+        client.get_available_program.await_args_list
+        == [call(appliance_ha_id, program_key=ProgramKey.DISHCARE_DISHWASHER_ECO_50)]
+        * expected_fetches
+    )
+    state = hass.states.get(selected_program_option_entity_id)
+    assert (
+        state is not None and state.state != STATE_UNAVAILABLE
+    ) is expected_available
+
+
 @pytest.mark.parametrize("appliance", ["Dishwasher"], indirect=True)
 @pytest.mark.parametrize(
     "event_key",
