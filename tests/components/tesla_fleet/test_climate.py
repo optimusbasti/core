@@ -391,6 +391,44 @@ async def test_asleep_or_offline(
     mock_wake_up.assert_called_once()
 
 
+@pytest.mark.usefixtures("entity_registry_enabled_by_default", "mock_request")
+async def test_wake_up_when_asleep_since_last_poll(
+    hass: HomeAssistant,
+    mock_wake_up: AsyncMock,
+    mock_vehicle_state: AsyncMock,
+    normal_config_entry: MockConfigEntry,
+) -> None:
+    """Tests the vehicle is woken up when it fell asleep after the last poll."""
+
+    await setup_platform(hass, normal_config_entry, [Platform.CLIMATE])
+    entity_id = "climate.test_climate"
+
+    # The vehicle is still online, so no wake up is sent
+    mock_vehicle_state.reset_mock()
+    await hass.services.async_call(
+        CLIMATE_DOMAIN, SERVICE_TURN_ON, {ATTR_ENTITY_ID: [entity_id]}, blocking=True
+    )
+    mock_vehicle_state.assert_called_once()
+    mock_wake_up.assert_not_called()
+
+    # The vehicle fell asleep, but the last poll still reported it online
+    mock_vehicle_state.return_value = VEHICLE_ASLEEP
+    await hass.services.async_call(
+        CLIMATE_DOMAIN, SERVICE_TURN_ON, {ATTR_ENTITY_ID: [entity_id]}, blocking=True
+    )
+    mock_wake_up.assert_called_once()
+
+    # The vehicle state cannot be checked
+    mock_vehicle_state.side_effect = InvalidCommand
+    with pytest.raises(HomeAssistantError, match="Failed to wake up vehicle"):
+        await hass.services.async_call(
+            CLIMATE_DOMAIN,
+            SERVICE_TURN_ON,
+            {ATTR_ENTITY_ID: [entity_id]},
+            blocking=True,
+        )
+
+
 async def test_climate_noscope(
     hass: HomeAssistant,
     readonly_config_entry: MockConfigEntry,

@@ -15,6 +15,15 @@ from .models import TeslaFleetVehicleData
 async def wake_up_vehicle(vehicle: TeslaFleetVehicleData) -> None:
     """Wake up a vehicle."""
     async with vehicle.wakelock:
+        if vehicle.coordinator.data["state"] == TeslaFleetState.ONLINE:
+            try:
+                cmd = await vehicle.api.vehicle()
+            except TeslaFleetError as e:
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="wake_up_failed",
+                ) from e
+            vehicle.coordinator.data["state"] = cmd["response"]["state"]
         times = 0
         while vehicle.coordinator.data["state"] != TeslaFleetState.ONLINE:
             try:
