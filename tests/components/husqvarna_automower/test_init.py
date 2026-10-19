@@ -21,6 +21,7 @@ from aioautomower.model import (
     WorkArea,
     WorkAreaType,
 )
+from aiohttp import ClientConnectionError
 from freezegun.api import FrozenDateTimeFactory
 import pytest
 from syrupy.assertion import SnapshotAssertion
@@ -30,7 +31,11 @@ from homeassistant.components.husqvarna_automower.coordinator import SCAN_INTERV
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.const import Platform
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.helpers import device_registry as dr, entity_registry as er
+from homeassistant.helpers import (
+    device_registry as dr,
+    entity_registry as er,
+    issue_registry as ir,
+)
 from homeassistant.helpers.config_entry_oauth2_flow import (
     ImplementationUnavailableError,
 )
@@ -764,3 +769,51 @@ async def test_migration_failure(
     await hass.async_block_till_done()
     assert legacy_mock_config_entry.minor_version == 1
     assert legacy_mock_config_entry.state is expected_state
+
+
+@pytest.mark.parametrize(
+    ("expires_at", "status", "exc", "expected_state"),
+    [
+        (
+            time.time() - 3600,
+            http.HTTPStatus.UNAUTHORIZED,
+            None,
+            ConfigEntryState.MIGRATION_ERROR,
+        ),
+        (
+            time.time() - 3600,
+            http.HTTPStatus.INTERNAL_SERVER_ERROR,
+            None,
+            ConfigEntryState.SETUP_RETRY,
+        ),
+        (
+            time.time() - 3600,
+            http.HTTPStatus.OK,
+            ClientConnectionError(),
+            ConfigEntryState.SETUP_RETRY,
+        ),
+    ],
+    ids=["unauthorized", "internal_server_error", "connection_error"],
+)
+async def test_migration_expired_token_refresh_failure(
+    hass: HomeAssistant,
+    legacy_mock_config_entry: MockConfigEntry,
+    aioclient_mock: AiohttpClientMocker,
+    status: http.HTTPStatus,
+    exc: Exception | None,
+    expected_state: ConfigEntryState,
+) -> None:
+    """Test token refresh failures during migration."""
+    aioclient_mock.clear_requests()
+    aioclient_mock.post(OAUTH2_TOKEN, status=status, exc=exc)
+
+    await setup_integration(hass, legacy_mock_config_entry)
+
+    assert legacy_mock_config_entry.state is expected_state
+    assert legacy_mock_config_entry.minor_version == 1
+    assert (
+        ir.async_get(hass).async_get_issue(
+            DOMAIN, f"migrate_could_not_auth_{legacy_mock_config_entry.entry_id}"
+        )
+        is not None
+    ) is (expected_state is ConfigEntryState.MIGRATION_ERROR)

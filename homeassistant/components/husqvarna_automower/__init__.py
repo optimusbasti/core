@@ -9,6 +9,7 @@ from homeassistant.exceptions import (
     ConfigEntryAuthFailed,
     ConfigEntryError,
     ConfigEntryNotReady,
+    OAuth2TokenRequestReauthError,
 )
 from homeassistant.helpers import (
     aiohttp_client,
@@ -62,13 +63,14 @@ async def async_migrate_entry(hass: HomeAssistant, entry: AutomowerConfigEntry) 
             api_api, await dt_util.async_get_time_zone(str(dt_util.DEFAULT_TIME_ZONE))
         )
         try:
+            await api_api.async_get_access_token()
             data = await automower_api.get_status()
         except ApiError as exc:
             raise ConfigEntryNotReady(
                 translation_key="could_not_connect",
                 translation_domain=DOMAIN,
             ) from exc
-        except AuthError as exc:
+        except (AuthError, OAuth2TokenRequestReauthError) as exc:
             async_create_issue(
                 hass,
                 DOMAIN,
